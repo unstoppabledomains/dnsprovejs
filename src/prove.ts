@@ -1,7 +1,6 @@
 import * as packet from 'dns-packet'
 import * as packet_types from 'dns-packet/types'
 import { sha256 } from '@noble/hashes/sha256'
-import { logger } from './log'
 
 export const DEFAULT_TRUST_ANCHORS: packet.Ds[] = [
   {
@@ -307,7 +306,6 @@ class DNSQuery {
       (r): r is Extract<packet.Answer, { type: T }> =>
         r.type === qtype && r.name === qname,
     )
-    logger.info(`Found ${answers.length} ${qtype} records for ${qname}`)
     if (answers.length === 0) {
       return null
     }
@@ -316,16 +314,12 @@ class DNSQuery {
       (r): r is packet.Rrsig =>
         r.type === 'RRSIG' && r.name === qname && r.data.typeCovered === qtype,
     )
-    logger.info(`Found ${sigs.length} RRSIGs over ${qtype} RRSET`)
 
     // If the records are self-signed, verify with DS records
     if (
       isTypedArray<'DNSKEY'>(answers) &&
       sigs.some((sig) => sig.name === sig.data.signersName)
     ) {
-      logger.info(
-        `DNSKEY RRSET on ${answers[0].name} is self-signed; attempting to verify with a DS in parent zone`,
-      )
       return this.verifyWithDS(answers, sigs) as any
     }
     return this.verifyRRSet(answers, sigs)
@@ -337,19 +331,9 @@ class DNSQuery {
   ): Promise<ProvableAnswer<T>> {
     for (const sig of sigs) {
       const { algorithms } = this.prover
-      logger.info(
-        `Attempting to verify the ${answers[0].type} RRSET on ${
-          answers[0].name
-        } with RRSIG=${sig.data.keyTag}/${
-          algorithms[sig.data.algorithm]?.name || sig.data.algorithm
-        }`,
-      )
       const ss = new SignedSet(answers, sig)
 
       if (!(sig.data.algorithm in algorithms)) {
-        logger.info(
-          `Skipping RRSIG=${sig.data.keyTag}/${sig.data.algorithm} on ${answers[0].type} RRSET for ${answers[0].name}: Unknown algorithm`,
-        )
         continue
       }
 
@@ -360,19 +344,11 @@ class DNSQuery {
       const { answer, proofs } = result
       for (const key of answer.records) {
         if (this.verifySignature(ss, key)) {
-          logger.info(
-            `RRSIG=${sig.data.keyTag}/${
-              algorithms[sig.data.algorithm].name
-            } verifies the ${answers[0].type} RRSET on ${answers[0].name}`,
-          )
           proofs.push(answer)
           return { answer: ss, proofs }
         }
       }
     }
-    logger.warn(
-      `Could not verify the ${answers[0].type} RRSET on ${answers[0].name} with any RRSIGs`,
-    )
     throw new NoValidDnskeyError(answers)
   }
 
@@ -402,38 +378,18 @@ class DNSQuery {
     const sigsByTag = makeIndex(sigs, (sig) => sig.data.keyTag)
 
     // Iterate over the DS records looking for keys we can verify
-    const { algorithms } = this.prover
-    const { digests } = this.prover
     for (const ds of answer) {
       for (const key of keysByTag[ds.data.keyTag] || []) {
         if (this.checkDs(ds, key)) {
-          logger.info(
-            `DS=${ds.data.keyTag}/${
-              algorithms[ds.data.algorithm]?.name || ds.data.algorithm
-            }/${digests[ds.data.digestType].name} verifies DNSKEY=${
-              ds.data.keyTag
-            }/${
-              algorithms[key.data.algorithm]?.name || key.data.algorithm
-            } on ${key.name}`,
-          )
           for (const sig of sigsByTag[ds.data.keyTag] || []) {
             const ss = new SignedSet(keys, sig)
             if (this.verifySignature(ss, key)) {
-              logger.info(
-                `RRSIG=${sig.data.keyTag}/${
-                  algorithms[sig.data.algorithm].name
-                } verifies the DNSKEY RRSET on ${keys[0].name}`,
-              )
               return { answer: ss, proofs }
             }
           }
         }
       }
     }
-
-    logger.warn(
-      `Could not find any DS records to verify the DNSKEY RRSET on ${keys[0].name}`,
-    )
     throw new NoValidDsError(keys)
   }
 
@@ -451,9 +407,6 @@ class DNSQuery {
     }
     const signatureAlgorithm = this.prover.algorithms[key.data.algorithm]
     if (signatureAlgorithm === undefined) {
-      logger.warn(
-        `Unrecognised signature algorithm for DNSKEY=${keyTag}/${key.data.algorithm} on ${key.name}`,
-      )
       return false
     }
     return signatureAlgorithm.f(
@@ -473,13 +426,6 @@ class DNSQuery {
     ])
     const digestAlgorithm = this.prover.digests[ds.data.digestType]
     if (digestAlgorithm === undefined) {
-      logger.warn(
-        `Unrecognised digest type for DS=${ds.data.keyTag}/${
-          ds.data.digestType
-        }/${
-          this.prover.algorithms[ds.data.algorithm]?.name || ds.data.algorithm
-        } on ${ds.name}`,
-      )
       return false
     }
     return digestAlgorithm.f(data, ds.data.digest)
@@ -515,9 +461,6 @@ class DNSQuery {
       this.cache[qname][qtype] = await this.prover.sendQuery(query)
     }
     const response = this.cache[qname][qtype]
-    logger.info(
-      `Query[${qname} ${qtype}]:\n${answersToString(response.answers)}`,
-    )
     if (response.rcode !== 'NOERROR') {
       throw new ResponseCodeError(query, response)
     }
